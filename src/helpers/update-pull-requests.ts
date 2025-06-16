@@ -1,8 +1,11 @@
-import { RestEndpointMethodTypes } from "@octokit/rest";
+import { RestEndpointMethodTypes } from "@octokit/plugin-rest-endpoint-methods";
+import { ReturnType } from "@sinclair/typebox";
 import ms from "ms";
+import db from "../cron/database-handler";
+import { updateCronState } from "../cron/workflow";
 import { getAllTimelineEvents } from "../handlers/github-events";
 import { generateSummary, ResultInfo } from "../handlers/summary";
-import { Context } from "../types";
+import { Context, ReposWatchSettings } from "../types";
 import {
   getApprovalCount,
   getMergeTimeoutAndApprovalRequiredCount,
@@ -26,23 +29,50 @@ function isIssueEvent(event: object): event is IssueEvent {
   return "created_at" in event;
 }
 
-export async function updatePullRequests(context: Context) {
-  const { logger } = context;
-  const results: ResultInfo[] = [];
-
-  if (!context.config.repos.monitor.length) {
-    const owner = context.payload.repository.owner;
-    if (owner) {
-      logger.info(`No organizations or repo have been specified, will default to the organization owner: ${owner.login}.`);
-    } else {
-      return logger.error("Could not set a default organization to watch, skipping.");
+async function removeEntryFromDatabase(issue: ReturnType<typeof parseGitHubUrl>) {
+  await db.update((data) => {
+    const key = `${issue.owner}/${issue.repo}`;
+    if (data[key]) {
+      data[key] = data[key].filter((o) => o.issueNumber !== issue.issue_number);
     }
+    return data;
+  });
+}
+
+export async function updatePullRequests(context: Context) {
+  const { logger, eventName, payload } = context;
+  const results: ResultInfo[] = [];
+  const issueNumber = payload.issue.number;
+
+  if (eventName === "issues.assigned") {
+    await db.update((data) => {
+      const dbKey = `${context.payload.repository.owner?.login}/${context.payload.repository.name}`;
+      if (!data[dbKey]) {
+        data[dbKey] = [];
+      }
+      if (!data[dbKey].some((o) => o.issueNumber === issueNumber)) {
+        data[dbKey].push({
+          issueNumber: issueNumber,
+        });
+      }
+      return data;
+    });
+    logger.info(`Issue ${issueNumber} had been registered in the DB.`, { url: payload.issue.html_url });
+    return;
   }
 
-  const pullRequests = await getOpenPullRequests(context, context.config.repos);
+  const pullRequests = await getOpenPullRequests(context, context.config.repos as ReposWatchSettings);
 
   if (!pullRequests?.length) {
-    return logger.info("Nothing to do.");
+    logger.info("Nothing to do, clearing entry from DB.");
+    await db.update((data) => {
+      const key = `${context.payload.repository.owner}/${context.payload.repository.name}`;
+      if (data[key]) {
+        data[key] = data[key].filter((o) => o.issueNumber !== issueNumber);
+      }
+      return data;
+    });
+    return;
   }
 
   for (const { html_url } of pullRequests) {
@@ -74,8 +104,15 @@ export async function updatePullRequests(context: Context) {
       );
       if (isNaN(lastActivityDate.getTime())) {
         logger.info(`PR ${html_url} does not seem to have any activity, nothing to do.`);
-      } else if (isPastOffset(lastActivityDate, requirements.mergeTimeout)) {
-        isMerged = await attemptMerging(context, { gitHubUrl, htmlUrl: html_url, requirements, lastActivityDate, pullRequestDetails });
+      } else if (requirements?.mergeTimeout && isPastOffset(lastActivityDate, requirements?.mergeTimeout)) {
+        isMerged = await attemptMerging(context, {
+          gitHubUrl,
+          htmlUrl: html_url,
+          requirements: requirements as Requirements,
+          lastActivityDate,
+          pullRequestDetails,
+        });
+        await removeEntryFromDatabase({ repo: context.payload.repository.name, owner: `${context.payload.repository.owner}`, issue_number: issueNumber });
       } else {
         logger.info(`PR ${html_url} has activity up until (${lastActivityDate}), nothing to do.`);
       }
@@ -85,6 +122,7 @@ export async function updatePullRequests(context: Context) {
     results.push({ url: html_url, merged: isMerged });
   }
   await generateSummary(context, results);
+  await updateCronState(context);
 }
 
 async function attemptMerging(
