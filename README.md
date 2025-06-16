@@ -5,7 +5,6 @@ on the association of the pull-request author.
 
 ## Configuration example
 
-
 ```yml
 - plugin: ubiquity-os-marketplace/daemon-merging
   with:
