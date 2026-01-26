@@ -62,6 +62,6 @@
       }
     }
   },
-  "homepage_url": "https://daemon-merging-development.deno.dev",
-  "short_name": "Meniole/daemon-merging@qa/fix-dispatch-20260126"
+  "homepage_url": "https://daemon-merging-qa-fix-disp.deno.dev",
+  "short_name": "Meniole/daemon-merging@development"
 }
