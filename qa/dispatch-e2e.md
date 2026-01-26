@@ -1,0 +1,1 @@
+QA e2e run for fix/dispatch\nIssue: https://github.com/Meniole/daemon-merging/issues/35\n
